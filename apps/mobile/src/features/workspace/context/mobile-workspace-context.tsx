@@ -547,7 +547,13 @@ export function MobileWorkspaceProvider({ children }: PropsWithChildren) {
   );
 
   const loadConversation = useCallback(
-    async (agentId: string, serverId = activeServerIdRef.current, refresh = false, attach = false) => {
+    async (
+      agentId: string,
+      serverId = activeServerIdRef.current,
+      refresh = false,
+      attach = false,
+      revision?: number,
+    ) => {
       const generation = loadGeneration.current;
       return conversationStore.loadLatest(
         agentId,
@@ -562,6 +568,7 @@ export function MobileWorkspaceProvider({ children }: PropsWithChildren) {
         () => generation === loadGeneration.current && Boolean(serverId) && !removedServers.current.has(serverId ?? ""),
         refresh,
         attach,
+        revision,
       );
     },
     [request, conversationStore],
@@ -992,8 +999,15 @@ export function MobileWorkspaceProvider({ children }: PropsWithChildren) {
         } else void refreshConversationReads(serverId).catch(() => undefined);
         if (conversationStore.get(event.page.agentId)) conversationStore.applyPage(event.page);
       } else if (event.type === "conversation-invalidated" || event.type === "turn-completed") {
+        // The end of a turn reads the chat once without a revision, so its final state is the host's.
         if (conversationStore.get(event.agentId))
-          void loadConversation(event.agentId, serverId, true).catch(() => undefined);
+          void loadConversation(
+            event.agentId,
+            serverId,
+            true,
+            false,
+            event.type === "conversation-invalidated" ? event.revision : undefined,
+          ).catch(() => undefined);
       } else if (event.type === "team-identity") {
         // The host uploads its logo to the account service under its own version, so that version
         // is also the directory key that loads the image.

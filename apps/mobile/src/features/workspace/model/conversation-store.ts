@@ -19,6 +19,15 @@ type ReadPage = (cursor?: string) => Promise<ConversationPage>;
  */
 const UNOBSERVED_MESSAGE_LIMIT = 200;
 
+/**
+ * A host sends a change notice for each step of a turn and answers one request at a time. A read that
+ * is asked for again while it runs waits this long before it reads once more, so a burst of notices
+ * costs one more read and the host can also answer the other requests.
+ */
+export function waitBeforeNextRead() {
+  return new Promise<void>((resolve) => setTimeout(resolve, 400));
+}
+
 export class MobileConversationStore {
   #entries = new Map<string, MobileConversation>();
   #listeners = new Map<string, Set<() => void>>();
@@ -26,7 +35,8 @@ export class MobileConversationStore {
   #deltas = new Map<string, Delta[]>();
   #cancelFrame: (() => void) | null = null;
   #olderLoads = new Map<string, symbol>();
-  #loads = new Map<string, { promise: Promise<ConversationPage>; dirty: boolean; attach: boolean }>();
+  /** `wanted` is the newest revision asked for while the read runs. */
+  #loads = new Map<string, { promise: Promise<ConversationPage>; wanted: number; attach: boolean }>();
 
   constructor(private schedule: (flush: () => void) => () => void) {}
 
@@ -167,32 +177,44 @@ export class MobileConversationStore {
     this.#publish(page.agentId, { ...page, olderLoading: false, olderError: false, detached: true });
   }
 
+  /**
+   * `revision` is the change that a host notice names. The chat does not read again when it already
+   * shows that revision, as after the streamed text of the change or after a read cursor moved.
+   */
   loadLatest(
     agentId: string,
     read: ReadPage,
     isCurrent: () => boolean,
     refresh = false,
     attach = false,
+    revision = Number.POSITIVE_INFINITY,
   ): Promise<ConversationPage> {
     const pending = this.#loads.get(agentId);
     if (pending) {
-      if (refresh) pending.dirty = true;
+      if (refresh) pending.wanted = Math.max(pending.wanted, revision);
       if (attach) pending.attach = true;
       return pending.promise;
     }
-    const load: { promise: Promise<ConversationPage>; dirty: boolean; attach: boolean } = {
-      dirty: false,
+    this.flush();
+    const current = this.get(agentId);
+    if (current && current.revision >= revision) return Promise.resolve(current);
+    const load: { promise: Promise<ConversationPage>; wanted: number; attach: boolean } = {
+      wanted: Number.NEGATIVE_INFINITY,
       attach,
       promise: Promise.resolve()
         .then(async () => {
-          let page: ConversationPage;
+          let page: ConversationPage | undefined;
           do {
-            load.dirty = false;
+            if (page) {
+              await waitBeforeNextRead();
+              if (!isCurrent() || this.#loads.get(agentId) !== load) return page;
+            }
+            load.wanted = Number.NEGATIVE_INFINITY;
             page = await read();
             if (page.agentId !== agentId) throw new Error("The server returned a page for another conversation.");
             if (!isCurrent() || this.#loads.get(agentId) !== load) return page;
             this.applyPage(page, undefined, load.attach);
-          } while (load.dirty);
+          } while (page.revision < load.wanted);
           return page;
         })
         .finally(() => {
