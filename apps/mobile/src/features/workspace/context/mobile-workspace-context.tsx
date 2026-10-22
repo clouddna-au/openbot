@@ -89,6 +89,7 @@ import { createBrowserActions } from "@/features/workspace/context/browser-actio
 import {
   createHostRequestActions,
   hostOwnsHide,
+  queueDecoder,
   readHostHiddenAgents,
   requestAgentAvatar,
   writeHostAgentHidden,
@@ -173,6 +174,8 @@ const NO_IDS: string[] = [];
 const NO_AGENTS: MobileAgent[] = [];
 /** The longest that the servers which are not selected wait for the selected one on a return to the app. */
 const OTHER_SERVERS_RETURN_DELAY_MS = 3_000;
+/** The chats that load at the same time after a server loads. The chat on screen does not wait for more. */
+const PRELOAD_IN_FLIGHT = 2;
 const EMPTY_SERVER: MobileServer = {
   id: "unavailable",
   name: "OpenBot",
@@ -445,9 +448,15 @@ export function MobileWorkspaceProvider({ children }: PropsWithChildren) {
     },
     [connectionWaits],
   );
+  // The query of `AgentPhoto`, so the Live Activity and the photo share one transfer and one copy.
   const loadAgentAvatar = useCallback(
-    (agentId: string, avatarUrl: string, serverId: string) => requestAgentAvatar(request, agentId, avatarUrl, serverId),
-    [request],
+    (agentId: string, avatarUrl: string, serverId: string) =>
+      queryClient.fetchQuery({
+        queryKey: queryKeys.agentAvatar(queryScope, serverId, agentId, avatarUrl),
+        queryFn: () => requestAgentAvatar(request, agentId, avatarUrl, serverId),
+        staleTime: Infinity,
+      }),
+    [request, queryClient, queryScope],
   );
   const postLiveActivityAction = useCallback(
     (serverId: string, path: string, body: TeamProtocolV2Json) => request("POST", path, ignoreResponse, body, serverId),
@@ -677,16 +686,17 @@ export function MobileWorkspaceProvider({ children }: PropsWithChildren) {
         (method, path, decode, body) => client.request(method, path, decode, body),
         compatibility.capabilities,
       ).catch(() => undefined);
-      const [summaries] = await Promise.all([
+      const [[summaries, hiddenAgents]] = await Promise.all([
         step(
           "agents",
           Promise.all([client.request("GET", TEAM_API_ROUTES.agents.all, decodeAgentSummaries), hidden]).then(
-            ([summaries, hiddenAgents]) => {
+            (loaded) => {
+              const [summaries, hiddenAgents] = loaded;
               if (context.isCurrent()) {
                 if (hiddenAgents !== undefined) applyHostHidden(serverId, hiddenAgents);
                 replaceServerAgents(serverId, summaries);
               }
-              return summaries;
+              return loaded;
             },
           ),
         ),
@@ -707,31 +717,42 @@ export function MobileWorkspaceProvider({ children }: PropsWithChildren) {
         sections,
       ]);
       if (!context.isCurrent()) return;
-      // The server is usable now, so the reconnect status does not wait for every cached chat. They
-      // load again after it, the open chat first. A lost connection stops them, and the next attempt
-      // loads them again; a chat that does not load here loads when it opens.
-      const ordered = [...summaries].sort(
-        (a, b) => Number(conversationStore.isObserved(b.id)) - Number(conversationStore.isObserved(a.id)),
-      );
-      void (async () => {
-        for (const agent of ordered) {
-          if (!context.isCurrent()) return;
-          if (!conversationStore.get(agent.id)) continue;
+      // The server is usable now, so the reconnect status does not wait for the chats. The open chat
+      // loads first, then the cached chats and the chats of the sidebar, the most recently active
+      // first, so the next chat that the user opens shows at once. They stay in memory only. A lost
+      // connection or the background stops them; a chat that does not load here loads when it opens.
+      const hiddenIds = new Set([...saved.hidden, ...(hiddenAgents ?? []).map((agent) => agent.agentId)]);
+      const ordered = summaries
+        .filter((agent) => conversationStore.get(agent.id) || !hiddenIds.has(agent.id))
+        .sort(
+          (a, b) =>
+            Number(conversationStore.isObserved(b.id)) - Number(conversationStore.isObserved(a.id)) ||
+            (Date.parse(b.updatedAt ?? "") || 0) - (Date.parse(a.updatedAt ?? "") || 0),
+        );
+      const preload = async () => {
+        for (let agent = ordered.shift(); agent && context.isCurrent(); agent = ordered.shift()) {
+          const agentId = agent.id;
           await conversationStore
             .loadLatest(
-              agent.id,
+              agentId,
               () =>
                 client.request(
                   "GET",
-                  `${TEAM_API_ROUTES.agent.conversationPage(agent.id)}?limit=50`,
+                  `${TEAM_API_ROUTES.agent.conversationPage(agentId)}?limit=50`,
                   decodeConversationPage,
                 ),
               context.isCurrent,
               true,
             )
             .catch(() => undefined);
+          if (!context.isCurrent()) return;
+          await queryClient.prefetchQuery({
+            queryKey: queryKeys.chatQueue(serverId, agentId),
+            queryFn: () => client.request("GET", TEAM_API_ROUTES.agent.queue(agentId), queueDecoder(agentId)),
+          });
         }
-      })();
+      };
+      for (let worker = 0; worker < PRELOAD_IN_FLIGHT; worker += 1) void preload();
       context.stage = "connection";
     },
     [
@@ -743,6 +764,7 @@ export function MobileWorkspaceProvider({ children }: PropsWithChildren) {
       applySidebarLayout,
       applyConversationReads,
       liveState,
+      queryClient,
     ],
   );
 

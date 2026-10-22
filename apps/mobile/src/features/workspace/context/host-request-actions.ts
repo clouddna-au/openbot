@@ -718,17 +718,7 @@ export function createHostRequestActions({
       });
     },
     loadQueue: (agentId, serverId) =>
-      request(
-        "GET",
-        TEAM_API_ROUTES.agent.queue(agentId),
-        (value) => {
-          if (!isQueueSnapshot(value) || value.agentId !== agentId)
-            throw new Error("The host returned an invalid queue.");
-          return value;
-        },
-        undefined,
-        serverId,
-      ),
+      request("GET", TEAM_API_ROUTES.agent.queue(agentId), queueDecoder(agentId), undefined, serverId),
     editQueue: async (agentId, serverId, input) => {
       return request(
         "POST",
@@ -819,6 +809,14 @@ function routineCalendarSource(
             return value;
           })
         : Effect.succeed([]),
+  };
+}
+
+/** Decodes the queue of one agent. The chat reads it, and the workspace reads it before the chat opens. */
+export function queueDecoder(agentId: string) {
+  return (value: unknown) => {
+    if (!isQueueSnapshot(value) || value.agentId !== agentId) throw new Error("The host returned an invalid queue.");
+    return value;
   };
 }
 
