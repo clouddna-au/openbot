@@ -144,7 +144,8 @@ export function useChatQueue(
     [storageKey],
   );
   const refresh = useCallback(() => {
-    void queryClient.invalidateQueries({ queryKey });
+    // A read that runs is enough. A second read beside it waits on the host behind the first.
+    void queryClient.invalidateQueries({ queryKey }, { cancelRefetch: false });
   }, [queryClient, queryKey]);
   useEffect(() => {
     if (online) refresh();

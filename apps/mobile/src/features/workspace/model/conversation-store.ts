@@ -44,6 +44,11 @@ export class MobileConversationStore {
     return this.#entries.get(agentId);
   }
 
+  /** The read of the latest page that runs for `agentId`, until the chat shows the revision it waits for. */
+  loading(agentId: string): Promise<unknown> | undefined {
+    return this.#loads.get(agentId)?.promise;
+  }
+
   isObserved(agentId: string) {
     return Boolean(this.#listeners.get(agentId)?.size);
   }

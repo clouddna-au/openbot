@@ -39,6 +39,11 @@ export function agentActivityMood(activity: MobileAgentActivity | undefined): Av
   return activity.phase === "waiting" ? "waiting" : "working";
 }
 
+/** Whether an agent of one server works on a turn. An agent that waits on an answer does not keep the host busy. */
+export function agentWorks(activities: MobileAgentActivities | undefined): boolean {
+  return Object.values(activities ?? {}).some((activity) => activity.phase !== "waiting");
+}
+
 /** When two requests wait in one turn, the higher rank names the wait, as on the desktop. */
 const WAIT_RANK = { approval: 0, takeover: 1, question: 2 } as const satisfies Record<MobileAgentWaitReason, number>;
 

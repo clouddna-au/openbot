@@ -101,7 +101,7 @@ import {
 import { useConversationReads } from "@/features/workspace/context/use-conversation-reads";
 import { useServerOrder } from "@/features/workspace/context/use-server-order";
 import { WorkspaceContexts } from "@/features/workspace/context/workspace-store";
-import { reduceAgentActivity } from "@/features/workspace/model/agent-activity";
+import { agentWorks, reduceAgentActivity } from "@/features/workspace/model/agent-activity";
 import {
   agentAvatarDataUrl,
   deleteServerAvatars,
@@ -110,7 +110,7 @@ import {
 import { canToggleAgentPin, reconcileAgentPins } from "@/features/workspace/model/agent-pins";
 import { ConnectionWaits } from "@/features/workspace/model/connection-waits";
 import { conversationMessageId, decodeConversationPage } from "@/features/workspace/model/conversation";
-import { MobileConversationStore } from "@/features/workspace/model/conversation-store";
+import { MobileConversationStore, waitBeforeNextRead } from "@/features/workspace/model/conversation-store";
 import { LiveWorkspaceStore } from "@/features/workspace/model/live-workspace-store";
 import {
   dropApproval,
@@ -747,7 +747,13 @@ export function MobileWorkspaceProvider({ children }: PropsWithChildren) {
         );
       // The chat that the user opens goes first: each read here waits while a request of a screen has
       // no answer, and the background reads wait until all chats are loaded.
-      void client.prefetch(async (read) => {
+      void client.prefetch(async (prefetchRead) => {
+        // The host answers about one request at a time, so these reads wait while an agent works on a turn.
+        const read: typeof prefetchRead = async (method, path, decode) => {
+          while (context.isCurrent() && agentWorks(liveState.get().activityByServer[serverId]))
+            await waitBeforeNextRead();
+          return prefetchRead(method, path, decode);
+        };
         const preload = async () => {
           for (let agent = ordered.shift(); agent && context.isCurrent(); agent = ordered.shift()) {
             const agentId = agent.id;
@@ -1233,6 +1239,12 @@ export function MobileWorkspaceProvider({ children }: PropsWithChildren) {
         return host.hostId;
       },
       ...hostRequests.actions,
+      // The chat's page holds the reply. The host answers about one request at a time, so a queue read
+      // waits until the page read of the same chat ends.
+      loadQueue: async (agentId, serverId) => {
+        await conversationStore.loading(agentId)?.catch(() => undefined);
+        return hostRequests.actions.loadQueue(agentId, serverId);
+      },
       loadAgentAnalytics: async (input, serverId) => {
         if (!agentsRef.current.some((agent) => agent.id === input.agentId && agent.serverId === serverId))
           throw new Error(currentText().t("mobile.workspace.error.agentNotOnHost"));
