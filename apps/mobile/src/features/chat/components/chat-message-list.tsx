@@ -228,6 +228,8 @@ interface ChatMessageListProps {
   keyboardOffset: number;
   canSend: boolean;
   online: boolean;
+  /** The app connects to the server again. The messages keep their look; answers wait for `online`. */
+  reconnecting?: boolean;
   appActive: boolean;
   activeTurnId: string | null;
   questionForm?: QuestionPromptController;
@@ -795,6 +797,7 @@ export const ChatMessageList = memo(function ChatMessageList({
   keyboardOffset,
   canSend,
   online,
+  reconnecting = false,
   appActive,
   activeTurnId,
   questionForm,
@@ -905,7 +908,7 @@ export const ChatMessageList = memo(function ChatMessageList({
   const arrivals = useMessageArrivals(replySession.key, messages, animateMessages && historyState === "ready");
   const agentColorMessages = useAgentColorMessages((state) => state.enabled);
   const userBubbleColor = getBloubAvatarColor(target.avatarSeed, target.avatarHue);
-  const appearance = useConnectionAppearance(!canSend);
+  const appearance = useConnectionAppearance(!canSend && !reconnecting);
   const red = Number.parseInt(userBubbleColor.slice(1, 3), 16);
   const green = Number.parseInt(userBubbleColor.slice(3, 5), 16);
   const blue = Number.parseInt(userBubbleColor.slice(5, 7), 16);
@@ -1139,7 +1142,7 @@ export const ChatMessageList = memo(function ChatMessageList({
       accessibilityLabel: `${activityAgent?.name ?? target.name}: ${activityLabel}`,
       agent: activityAgent,
       mood: animateMessages ? agentActivityMood(activity) : "idle",
-      online,
+      online: online || reconnecting,
       animateAvatar: animateMessages,
       shimmer:
         animateMessages &&

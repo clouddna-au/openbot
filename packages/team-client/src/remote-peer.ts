@@ -294,16 +294,13 @@ const SIGNAL_RENEW_DELAY_MS = 8_000;
 const HOST_WAIT_RENEW_MS = 60_000;
 const REQUEST_TIMEOUT_MS = 10 * 60_000 + 30_000;
 /**
- * The host gets no answer to its ICE consent checks while the phone is suspended, and stops using a
- * path that did not answer for 30 s (RFC 7675). A longer absence needs an ICE restart.
+ * After this long away from the app, the peer is replaced, not resumed. The host gets no answer to
+ * its ICE consent checks while the phone is suspended, and stops using a path that did not answer
+ * for 30 s (RFC 7675). An ICE restart on that peer does not help: on an iPhone after 60-180 s away,
+ * the host answered "The server no longer has this connection" after 2.5 s in 5 of 5 runs, and only
+ * then did the fresh connection start. A new peer on the same session starts at once.
  */
-const ICE_CONSENT_TIMEOUT_MS = 30_000;
-/**
- * Signal closes a socket that sent nothing for 120 s, and tells the host to drop its connection 30 s
- * later. After this long away from the app the host has dropped it, so the peer is replaced, not
- * resumed. The margin covers the seconds before iOS suspends the app.
- */
-export const REMOTE_PEER_LOST_AFTER_MS = 160_000;
+export const REMOTE_PEER_LOST_AFTER_MS = 30_000;
 
 class RemotePeerIO extends Context.Service<
   RemotePeerIO,
@@ -436,10 +433,10 @@ export function createRemoteTeamPeer(actions: ActionsRef, options: { waitForHost
         if (!state.authenticated) failPeer(state, new Error(sourceText("error.remote.appInBackground")), actions);
       } else {
         if (away >= REMOTE_PEER_LOST_AFTER_MS && state.authenticated) {
-          // The host has dropped this connection. Close it without an offline update: the consumer
-          // connects on each return, and that connect starts the new peer on the same session. A
-          // resume hello would only renew an expired token through the account service, and a read
-          // would wait for its timeout on the dead path.
+          // The host has stopped using this path or dropped the connection. Close it without an
+          // offline update: the consumer connects on each return, and that connect starts the new
+          // peer on the same session. An ICE restart or a resume hello would only wait for the
+          // host to refuse it, and a read would wait for its timeout on the dead path.
           void runPeerEffect(closePeer(actions.current.endSession, true));
         } else if (canRecoverPeer(state)) {
           recoverIce(state, actions, 0);
@@ -447,10 +444,7 @@ export function createRemoteTeamPeer(actions: ActionsRef, options: { waitForHost
           failPeer(state, new Error(sourceText("error.remote.desktopRestoreNeeded")), actions);
         } else {
           resumeTurnRefresh(state);
-          // The host stopped using the path. A renewed socket restarts ICE on its `ready`: the path
-          // comes back, or the answer of a host that dropped the connection fails the peer at once.
-          if (away >= ICE_CONSENT_TIMEOUT_MS) renewSignal(state, actions);
-          else if (!state.socket) openSignal(state, actions);
+          if (!state.socket) openSignal(state, actions);
           // The recovery owner reloads workspace reads on every foreground return.
           // Do not request a second reload for reads canceled on background entry.
           state.needsResync = false;

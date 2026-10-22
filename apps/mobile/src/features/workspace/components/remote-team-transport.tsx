@@ -27,11 +27,7 @@ import type {
 import { supportLog, supportLogUrl } from "@/features/support/model/support-log";
 import { InactiveRequestError } from "@/features/workspace/model/pending-approvals";
 import { referencedError } from "@/features/workspace/model/referenced-error";
-import {
-  BACKGROUND_READS_IN_FLIGHT,
-  createRequestLimiter,
-  isBackgroundRead,
-} from "@/features/workspace/model/request-lanes";
+import { createRequestLanes, isBackgroundRead } from "@/features/workspace/model/request-lanes";
 import { expoGoDomOptions } from "@/shared/lib/expo-go-dom";
 import { currentText } from "@/shared/lib/text";
 
@@ -49,6 +45,13 @@ export interface RemoteTeamTransportRef {
     /** Hears the fraction of the uploaded file sent so far, from 0 to 1. */
     onUploadProgress?: (fraction: number) => void,
   ): Promise<T>;
+  /**
+   * Loads chats before they open. Its reads wait while a `request` has no answer, and the
+   * background reads wait until it ends.
+   */
+  prefetch(
+    run: (read: <T>(method: string, path: string, decode: (value: unknown) => T) => Promise<T>) => Promise<unknown>,
+  ): Promise<void>;
   /** Null until the peer page is ready for views. Events of a closed view are dropped. */
   openBrowserView(
     options: Omit<BrowserViewBridgeOpen, "viewId">,
@@ -85,9 +88,9 @@ export const RemoteTeamTransport = forwardRef<RemoteTeamTransportRef, RemoteTeam
     // The server of this transport, for support log lines. Requests do not name it.
     const hostIdRef = useRef<string | null>(null);
     useEffect(() => () => mailbox.dispose(), [mailbox]);
-    const backgroundReads = useRef<ReturnType<typeof createRequestLimiter> | null>(null);
-    backgroundReads.current ??= createRequestLimiter(BACKGROUND_READS_IN_FLIGHT);
-    const backgroundLane = backgroundReads.current;
+    const lanesRef = useRef<ReturnType<typeof createRequestLanes> | null>(null);
+    lanesRef.current ??= createRequestLanes();
+    const lanes = lanesRef.current;
 
     const bridge = useRef<RemoteTeamBridgeHandle>(null);
     const viewListeners = useRef(new Map<string, (event: BrowserViewBridgeEvent) => void>());
@@ -120,6 +123,47 @@ export const RemoteTeamTransport = forwardRef<RemoteTeamTransportRef, RemoteTeam
       [mailbox],
     );
 
+    const send = useCallback(
+      async <T,>(
+        lane: "foreground" | "prefetchRead" | "background",
+        method: string,
+        path: string,
+        decode: (value: unknown) => T,
+        body: TeamProtocolV2Json = {},
+        upload?: RemoteFileUpload,
+        onUploadProgress?: (fraction: number) => void,
+      ): Promise<T> => {
+        const started = Date.now();
+        const result = await lanes[lane](() =>
+          enqueue({ type: "request", method, path, body, upload }, onUploadProgress),
+        );
+        // Method, path, status and time only. Never the body or the upload.
+        const request = `${hostIdRef.current ?? "unknown server"} ${method} ${supportLogUrl(path)}`;
+        const time = `(${Date.now() - started} ms)`;
+        if (!result.ok)
+          supportLog.add("warn", "connection", `${request} -> failed: ${result.error ?? "no error"} ${time}`);
+        else
+          supportLog.add(
+            result.status !== undefined && result.status >= 400 ? "warn" : "info",
+            "connection",
+            `${request} -> ${result.status ?? "no status"} ${time}`,
+          );
+        if (!result.ok)
+          throw referencedError(result.error ?? sourceText("error.remote.serverRequestFailed"), result.reference);
+        if (result.status === 409 && isQueueEditRoute(method, path))
+          throw new QueueEditRejectedError(currentText().t("mobile.workspace.error.queueEditRejected"));
+        // The host answers 409 when a form or an approval no longer waits: answered elsewhere, or ended.
+        if (result.status === 409 && method === "POST" && path === TEAM_API_ROUTES.respond.approval)
+          throw new InactiveRequestError(currentText().t("mobile.workspace.error.approvalInactive"));
+        if (result.status === 409 && method === "POST" && path === TEAM_API_ROUTES.respond.prompt)
+          throw new InactiveRequestError(currentText().t("mobile.workspace.error.formUnavailable"));
+        if (result.status !== undefined && result.status >= 400)
+          throw referencedError(sourceText("error.remote.serverRequestFailed"), referenceFrom("http", result.status));
+        return decode(result.body);
+      },
+      [enqueue, lanes],
+    );
+
     useImperativeHandle(
       ref,
       () => ({
@@ -140,41 +184,18 @@ export const RemoteTeamTransport = forwardRef<RemoteTeamTransportRef, RemoteTeam
               result.reference,
             );
         },
-        request: async <T,>(
-          method: string,
-          path: string,
-          decode: (value: unknown) => T,
-          body: TeamProtocolV2Json = {},
-          upload?: RemoteFileUpload,
-          onUploadProgress?: (fraction: number) => void,
-        ): Promise<T> => {
-          const started = Date.now();
-          const send = () => enqueue({ type: "request", method, path, body, upload }, onUploadProgress);
-          const result = await (isBackgroundRead(method, path) ? backgroundLane(send) : send());
-          // Method, path, status and time only. Never the body or the upload.
-          const request = `${hostIdRef.current ?? "unknown server"} ${method} ${supportLogUrl(path)}`;
-          const time = `(${Date.now() - started} ms)`;
-          if (!result.ok)
-            supportLog.add("warn", "connection", `${request} -> failed: ${result.error ?? "no error"} ${time}`);
-          else
-            supportLog.add(
-              result.status !== undefined && result.status >= 400 ? "warn" : "info",
-              "connection",
-              `${request} -> ${result.status ?? "no status"} ${time}`,
-            );
-          if (!result.ok)
-            throw referencedError(result.error ?? sourceText("error.remote.serverRequestFailed"), result.reference);
-          if (result.status === 409 && isQueueEditRoute(method, path))
-            throw new QueueEditRejectedError(currentText().t("mobile.workspace.error.queueEditRejected"));
-          // The host answers 409 when a form or an approval no longer waits: answered elsewhere, or ended.
-          if (result.status === 409 && method === "POST" && path === TEAM_API_ROUTES.respond.approval)
-            throw new InactiveRequestError(currentText().t("mobile.workspace.error.approvalInactive"));
-          if (result.status === 409 && method === "POST" && path === TEAM_API_ROUTES.respond.prompt)
-            throw new InactiveRequestError(currentText().t("mobile.workspace.error.formUnavailable"));
-          if (result.status !== undefined && result.status >= 400)
-            throw referencedError(sourceText("error.remote.serverRequestFailed"), referenceFrom("http", result.status));
-          return decode(result.body);
-        },
+        request: (method, path, decode, body, upload, onUploadProgress) =>
+          send(
+            isBackgroundRead(method, path) ? "background" : "foreground",
+            method,
+            path,
+            decode,
+            body,
+            upload,
+            onUploadProgress,
+          ),
+        prefetch: (run) =>
+          lanes.prefetch(() => run((method, path, decode) => send("prefetchRead", method, path, decode))),
         openBrowserView: (options, listener) => {
           const viewId = Crypto.randomUUID();
           viewListeners.current.set(viewId, listener);
@@ -194,7 +215,7 @@ export const RemoteTeamTransport = forwardRef<RemoteTeamTransportRef, RemoteTeam
           };
         },
       }),
-      [enqueue, sendViewCommand, backgroundLane],
+      [enqueue, sendViewCommand, send, lanes],
     );
 
     const handleCommandResult = useCallback(

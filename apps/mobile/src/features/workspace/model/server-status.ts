@@ -25,6 +25,19 @@ export function showsOnline(server: Pick<MobileServer, "state" | "resuming"> | u
   return server?.state === "online" || server?.resuming === true;
 }
 
+/**
+ * True while the app runs its attempts to connect again to a server that it had reached. The status
+ * line shows the attempts. The open chat keeps its look and its composer, and the outbox keeps what
+ * the user sends. Actions that need the host still read `showsOnline`. After the last attempt fails,
+ * the cooldown shows the server as offline.
+ */
+export function reconnects(
+  server: Pick<MobileServer, "initialConnectionPending" | "recoveryStatus"> | undefined,
+): boolean {
+  const phase = server?.recoveryStatus?.phase;
+  return server?.initialConnectionPending === false && (phase === "connecting" || phase === "waiting");
+}
+
 export function serverStatusLabel(
   server: Pick<MobileServer, "state" | "initialConnectionPending" | "resuming">,
   t: MobileTranslate,

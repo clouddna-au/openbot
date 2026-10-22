@@ -48,7 +48,7 @@ import {
 import type { MobileAgentActivity } from "@/features/workspace/model/agent-activity";
 import type { PendingApproval } from "@/features/workspace/model/pending-approvals";
 import { queryKeys } from "@/features/workspace/model/query-keys";
-import { showsOnline } from "@/features/workspace/model/server-status";
+import { reconnects, showsOnline } from "@/features/workspace/model/server-status";
 import { haptics } from "@/shared/lib/haptics";
 import { isAndroid, isIOS } from "@/shared/lib/platform";
 import { useText } from "@/shared/lib/text";
@@ -468,12 +468,15 @@ export function ChatView({
   const liquidGlassAvailable = isLiquidGlassAvailable() && !reducedTransparency;
   // A quiet return to the app counts as online: the chat keeps its look, and its requests wait.
   const serverOnline = showsOnline(server);
+  // While the app connects again, the chat also keeps its look and its composer. The status line
+  // shows the attempts, the outbox keeps what the user sends, and answers to the host wait for online.
+  const reconnecting = !serverOnline && reconnects(server);
   // Speech goes to the voice mode's own transcript, and only Send makes it a
   // message. Leaving the chat or losing the server stops listening and keeps it.
   const voice = useVoiceMode({
-    enabled: isFocused && serverOnline && canSend,
+    enabled: isFocused && (serverOnline || reconnecting) && canSend,
     focused: isFocused,
-    sendable: serverOnline && canSend,
+    sendable: (serverOnline || reconnecting) && canSend,
     onSend: sendMessage,
   });
   // Not gated on `appActive`. Notification Center and other system overlays make iOS report the app
@@ -838,6 +841,7 @@ export function ChatView({
               keyboardOffset={keyboardOffset}
               canSend={serverOnline && canSend}
               online={serverOnline}
+              reconnecting={reconnecting}
               activity={activity}
               historyState={
                 ready

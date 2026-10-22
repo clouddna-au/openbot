@@ -26,7 +26,7 @@ import {
 } from "@/features/workspace/components/use-connection-appearance";
 import { useMobileWorkspaceSelector } from "@/features/workspace/context/mobile-workspace-context";
 import { agentActivityMood } from "@/features/workspace/model/agent-activity";
-import { showsOnline } from "@/features/workspace/model/server-status";
+import { reconnects, showsOnline } from "@/features/workspace/model/server-status";
 import { AgentPhoto, type AgentPhotoProps } from "./agent-photo";
 
 interface BloubAvatarProps extends AgentPhotoProps {
@@ -77,7 +77,8 @@ export function BloubAvatar({
     (workspace) => hostId ?? workspace.agents.find((agent) => agent.id === agentId)?.serverId,
   );
   const disconnected = useMobileWorkspaceSelector(
-    (workspace) => !workspace.servers.some((server) => server.id === serverId && showsOnline(server)),
+    (workspace) =>
+      !workspace.servers.some((server) => server.id === serverId && (showsOnline(server) || reconnects(server))),
   );
   const activity = useAgentActivity(agentId);
   return (

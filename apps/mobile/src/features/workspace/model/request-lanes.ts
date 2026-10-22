@@ -13,7 +13,7 @@ const BACKGROUND_READS: readonly { method: string; route: RegExp }[] = [
 ];
 
 /** The background reads that one server has sent and that have no answer yet. */
-export const BACKGROUND_READS_IN_FLIGHT = 2;
+const BACKGROUND_READS_IN_FLIGHT = 2;
 
 export function isBackgroundRead(method: string, path: string): boolean {
   const route = path.split("?", 1)[0] ?? path;
@@ -21,7 +21,7 @@ export function isBackgroundRead(method: string, path: string): boolean {
 }
 
 /** Runs at most `limit` tasks at a time, in the order they arrive. */
-export function createRequestLimiter(limit: number) {
+function createRequestLimiter(limit: number) {
   let running = 0;
   const waiting: (() => void)[] = [];
   return async <T>(task: () => Promise<T>): Promise<T> => {
@@ -35,5 +35,64 @@ export function createRequestLimiter(limit: number) {
       if (next) next();
       else running -= 1;
     }
+  };
+}
+
+/**
+ * The requests of one server, in the order that the user needs them. The host answers about one
+ * request at a time, so a request that waits on the phone lets the requests of a higher lane go first.
+ * - `foreground`: what the screens ask for, such as the chat that the user opened. It never waits.
+ * - `prefetch`: the chats that load before they open. A read waits while a foreground request has no answer.
+ * - `background`: the reads of `isBackgroundRead`. They wait until the prefetch ends, then go a few at a time.
+ */
+export function createRequestLanes() {
+  let foreground = 0;
+  let prefetches = 0;
+  const waiting = new Set<() => void>();
+  const wake = () => {
+    for (const check of [...waiting]) check();
+  };
+  const until = (ready: () => boolean) =>
+    ready()
+      ? Promise.resolve()
+      : new Promise<void>((resolve) => {
+          const check = () => {
+            if (!ready()) return;
+            waiting.delete(check);
+            resolve();
+          };
+          waiting.add(check);
+        });
+  const backgroundSlots = createRequestLimiter(BACKGROUND_READS_IN_FLIGHT);
+  return {
+    async foreground<T>(task: () => Promise<T>): Promise<T> {
+      foreground += 1;
+      try {
+        return await task();
+      } finally {
+        foreground -= 1;
+        wake();
+      }
+    },
+    async prefetchRead<T>(task: () => Promise<T>): Promise<T> {
+      await until(() => foreground === 0);
+      return task();
+    },
+    background<T>(task: () => Promise<T>): Promise<T> {
+      return backgroundSlots(async () => {
+        await until(() => prefetches === 0);
+        return task();
+      });
+    },
+    /** Background reads wait until `run` ends, also when it fails. */
+    async prefetch(run: () => Promise<unknown>): Promise<void> {
+      prefetches += 1;
+      try {
+        await run();
+      } finally {
+        prefetches -= 1;
+        wake();
+      }
+    },
   };
 }

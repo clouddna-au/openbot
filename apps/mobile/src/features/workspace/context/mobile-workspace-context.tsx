@@ -729,30 +729,30 @@ export function MobileWorkspaceProvider({ children }: PropsWithChildren) {
             Number(conversationStore.isObserved(b.id)) - Number(conversationStore.isObserved(a.id)) ||
             (Date.parse(b.updatedAt ?? "") || 0) - (Date.parse(a.updatedAt ?? "") || 0),
         );
-      const preload = async () => {
-        for (let agent = ordered.shift(); agent && context.isCurrent(); agent = ordered.shift()) {
-          const agentId = agent.id;
-          await conversationStore
-            .loadLatest(
-              agentId,
-              () =>
-                client.request(
-                  "GET",
-                  `${TEAM_API_ROUTES.agent.conversationPage(agentId)}?limit=50`,
-                  decodeConversationPage,
-                ),
-              context.isCurrent,
-              true,
-            )
-            .catch(() => undefined);
-          if (!context.isCurrent()) return;
-          await queryClient.prefetchQuery({
-            queryKey: queryKeys.chatQueue(serverId, agentId),
-            queryFn: () => client.request("GET", TEAM_API_ROUTES.agent.queue(agentId), queueDecoder(agentId)),
-          });
-        }
-      };
-      for (let worker = 0; worker < PRELOAD_IN_FLIGHT; worker += 1) void preload();
+      // The chat that the user opens goes first: each read here waits while a request of a screen has
+      // no answer, and the background reads wait until all chats are loaded.
+      void client.prefetch(async (read) => {
+        const preload = async () => {
+          for (let agent = ordered.shift(); agent && context.isCurrent(); agent = ordered.shift()) {
+            const agentId = agent.id;
+            await conversationStore
+              .loadLatest(
+                agentId,
+                () =>
+                  read("GET", `${TEAM_API_ROUTES.agent.conversationPage(agentId)}?limit=50`, decodeConversationPage),
+                context.isCurrent,
+                true,
+              )
+              .catch(() => undefined);
+            if (!context.isCurrent()) return;
+            await queryClient.prefetchQuery({
+              queryKey: queryKeys.chatQueue(serverId, agentId),
+              queryFn: () => read("GET", TEAM_API_ROUTES.agent.queue(agentId), queueDecoder(agentId)),
+            });
+          }
+        };
+        await Promise.all(Array.from({ length: PRELOAD_IN_FLIGHT }, preload));
+      });
       context.stage = "connection";
     },
     [
