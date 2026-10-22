@@ -12,6 +12,13 @@ export interface MobileConversation extends ConversationPage {
 type ReadPage = (cursor?: string) => Promise<ConversationPage>;
 
 /** In-memory chat windows. Only subscribers to a changed agent are notified. */
+/**
+ * A chat that no screen shows keeps up to this many messages. A latest page alone can hold more than
+ * 50 messages, so a lower limit dropped every closed or prefetched chat, and the next open waited for
+ * the host again. The limit only removes histories that the reader paged far back into.
+ */
+const UNOBSERVED_MESSAGE_LIMIT = 200;
+
 export class MobileConversationStore {
   #entries = new Map<string, MobileConversation>();
   #listeners = new Map<string, Set<() => void>>();
@@ -44,7 +51,7 @@ export class MobileConversationStore {
         this.#listeners.delete(agentId);
         const entry = this.get(agentId);
         // A window around a searched message is not the chat that the next reader opens.
-        if (entry && (entry.detached || entry.messages.length > 50)) this.remove(agentId);
+        if (entry && (entry.detached || entry.messages.length > UNOBSERVED_MESSAGE_LIMIT)) this.remove(agentId);
       }
     };
   }
@@ -74,7 +81,7 @@ export class MobileConversationStore {
   }
 
   #publish(agentId: string, entry: MobileConversation, reindex = true) {
-    if (!this.isObserved(agentId) && entry.messages.length > 50) {
+    if (!this.isObserved(agentId) && entry.messages.length > UNOBSERVED_MESSAGE_LIMIT) {
       this.remove(agentId);
       return;
     }
