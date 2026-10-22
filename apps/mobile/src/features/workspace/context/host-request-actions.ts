@@ -143,6 +143,7 @@ import type { QueryClient } from "@tanstack/react-query";
 import { Effect } from "effect";
 import * as Crypto from "expo-crypto";
 import { createProviderAdmin } from "@/features/servers/model/provider-admin";
+import { saveAgentAvatar, savedAgentAvatar } from "@/features/workspace/model/agent-avatar-cache";
 import { decodeConversationSearchPage } from "@/features/workspace/model/conversation";
 import { type QueryScope, queryKeys } from "@/features/workspace/model/query-keys";
 import { saveAgentRecord } from "@/features/workspace/model/save-agent-record";
@@ -820,16 +821,21 @@ export function queueDecoder(agentId: string) {
   };
 }
 
-/** The agent photo as a data URL. The Live Activity reads it too, outside the workspace value. */
-export function requestAgentAvatar(
+/**
+ * The agent photo as a `file://` URI, or as a data URL when the phone cannot save it. A photo that
+ * this phone has saved needs no request. The Live Activity reads it too, outside the workspace value.
+ */
+export async function requestAgentAvatar(
   request: WorkspaceRequest,
   agentId: string,
   avatarUrl: string,
   serverId: string,
 ): Promise<string> {
+  const saved = savedAgentAvatar(serverId, agentId, avatarUrl);
+  if (saved) return saved;
   const version = new URL(avatarUrl).searchParams.get("v");
-  if (!version) return Promise.reject(new Error("The agent avatar has no version."));
-  return request(
+  if (!version) throw new Error("The agent avatar has no version.");
+  const dataUrl = await request(
     "GET",
     `${TEAM_API_ROUTES.agent.avatar(agentId)}?${new URLSearchParams({ v: version })}`,
     (value) => {
@@ -845,4 +851,5 @@ export function requestAgentAvatar(
     undefined,
     serverId,
   );
+  return saveAgentAvatar(serverId, agentId, avatarUrl, dataUrl);
 }

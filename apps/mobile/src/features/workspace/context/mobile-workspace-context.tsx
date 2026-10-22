@@ -102,6 +102,11 @@ import { useConversationReads } from "@/features/workspace/context/use-conversat
 import { useServerOrder } from "@/features/workspace/context/use-server-order";
 import { WorkspaceContexts } from "@/features/workspace/context/workspace-store";
 import { reduceAgentActivity } from "@/features/workspace/model/agent-activity";
+import {
+  agentAvatarDataUrl,
+  deleteServerAvatars,
+  saveAgentAvatar,
+} from "@/features/workspace/model/agent-avatar-cache";
 import { canToggleAgentPin, reconcileAgentPins } from "@/features/workspace/model/agent-pins";
 import { ConnectionWaits } from "@/features/workspace/model/connection-waits";
 import { conversationMessageId, decodeConversationPage } from "@/features/workspace/model/conversation";
@@ -342,6 +347,7 @@ export function MobileWorkspaceProvider({ children }: PropsWithChildren) {
       const removedAgentIds = new Set<string>();
       for (const serverId of serverIds) {
         removedServers.current.add(serverId);
+        deleteServerAvatars(serverId);
         connectionWaits.drop(serverId, new Error(currentText().t("mobile.workspace.error.transportNotReady")));
         readRefresh.invalidate(serverId);
         for (const id of serverAgentIds.current.get(serverId) ?? []) removedAgentIds.add(id);
@@ -449,13 +455,16 @@ export function MobileWorkspaceProvider({ children }: PropsWithChildren) {
     [connectionWaits],
   );
   // The query of `AgentPhoto`, so the Live Activity and the photo share one transfer and one copy.
+  // The Live Activity takes a data URL.
   const loadAgentAvatar = useCallback(
     (agentId: string, avatarUrl: string, serverId: string) =>
-      queryClient.fetchQuery({
-        queryKey: queryKeys.agentAvatar(queryScope, serverId, agentId, avatarUrl),
-        queryFn: () => requestAgentAvatar(request, agentId, avatarUrl, serverId),
-        staleTime: Infinity,
-      }),
+      queryClient
+        .fetchQuery({
+          queryKey: queryKeys.agentAvatar(queryScope, serverId, agentId, avatarUrl),
+          queryFn: () => requestAgentAvatar(request, agentId, avatarUrl, serverId),
+          staleTime: Infinity,
+        })
+        .then(agentAvatarDataUrl),
     [request, queryClient, queryScope],
   );
   const postLiveActivityAction = useCallback(
@@ -1276,7 +1285,7 @@ export function MobileWorkspaceProvider({ children }: PropsWithChildren) {
         if (image && updated.avatarUrl) {
           queryClient.setQueryData(
             queryKeys.agentAvatar(queryScope, serverId, agentId, updated.avatarUrl),
-            `data:${image.mimeType};base64,${image.base64}`,
+            saveAgentAvatar(serverId, agentId, updated.avatarUrl, `data:${image.mimeType};base64,${image.base64}`),
           );
         }
         setAgents((current) =>
